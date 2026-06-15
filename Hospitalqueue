@@ -1,0 +1,340 @@
+import java.util.*;
+
+/**
+ * =====================================================================
+ *  Unimed SmartQueue — Triagem Inteligente com Algoritmo de Dijkstra
+ * =====================================================================
+ *
+ *  Cenário: Sistema de roteamento de pacientes em uma UPA da Unimed.
+ *  Cada "nó" do grafo representa uma etapa do atendimento hospitalar
+ *  (recepção, triagem, exames, especialidades, etc.).
+ *  Cada "aresta" tem um peso que combina:
+ *    - Tempo médio de espera atual naquele setor
+ *    - Urgência do paciente (prioridade Manchester)
+ *    - Capacidade disponível do setor
+ *
+ *  O Dijkstra encontra o caminho de menor "custo total" da entrada
+ *  do paciente até a alta, respeitando urgência e disponibilidade.
+ * =====================================================================
+ */
+public class HospitalQueue {
+
+    // ─── Cores ANSI para output bonito no terminal ───────────────────
+    static final String RESET  = "\u001B[0m";
+    static final String BOLD   = "\u001B[1m";
+    static final String RED    = "\u001B[31m";
+    static final String YELLOW = "\u001B[33m";
+    static final String GREEN  = "\u001B[32m";
+    static final String BLUE   = "\u001B[34m";
+    static final String CYAN   = "\u001B[36m";
+    static final String PURPLE = "\u001B[35m";
+
+    // ─── Níveis de Prioridade Manchester ─────────────────────────────
+    enum Prioridade {
+        VERMELHO("Vermelho 🔴", 1, "Emergência — atendimento imediato"),
+        LARANJA ("Laranja  🟠", 2, "Muito Urgente — até 10 min"),
+        AMARELO ("Amarelo  🟡", 3, "Urgente — até 60 min"),
+        VERDE   ("Verde    🟢", 4, "Pouco Urgente — até 120 min"),
+        AZUL    ("Azul     🔵", 5, "Não Urgente — até 240 min");
+
+        final String label;
+        final int nivel;
+        final String descricao;
+
+        Prioridade(String label, int nivel, String descricao) {
+            this.label = label;
+            this.nivel = nivel;
+            this.descricao = descricao;
+        }
+    }
+
+    // ─── Setor do hospital ────────────────────────────────────────────
+    static class Setor {
+        final String id;
+        final String nome;
+        int capacidadeMax;
+        int ocupacaoAtual;
+        int tempoMedioAtendimento; // minutos
+
+        Setor(String id, String nome, int capacidadeMax, int ocupacao, int tempoMedio) {
+            this.id = id;
+            this.nome = nome;
+            this.capacidadeMax = capacidadeMax;
+            this.ocupacaoAtual = ocupacao;
+            this.tempoMedioAtendimento = tempoMedio;
+        }
+
+        double disponibilidade() {
+            return 1.0 - ((double) ocupacaoAtual / capacidadeMax);
+        }
+
+        String statusBar() {
+            int pct = (int)((double) ocupacaoAtual / capacidadeMax * 10);
+            String cor = pct >= 9 ? RED : pct >= 6 ? YELLOW : GREEN;
+            return cor + "█".repeat(pct) + "░".repeat(10 - pct) + RESET
+                + String.format(" %d/%d", ocupacaoAtual, capacidadeMax);
+        }
+    }
+
+    // ─── Aresta do grafo ─────────────────────────────────────────────
+    static class Aresta {
+        final String destino;
+        final double pesoBase; // tempo base de transição (min)
+
+        Aresta(String destino, double pesoBase) {
+            this.destino = destino;
+            this.pesoBase = pesoBase;
+        }
+    }
+
+    // ─── Entrada da fila de prioridade do Dijkstra ───────────────────
+    static class No implements Comparable<No> {
+        final String setorId;
+        final double custo;
+        final List<String> caminho;
+
+        No(String setorId, double custo, List<String> caminho) {
+            this.setorId = setorId;
+            this.custo = custo;
+            this.caminho = new ArrayList<>(caminho);
+        }
+
+        @Override
+        public int compareTo(No outro) {
+            return Double.compare(this.custo, outro.custo);
+        }
+    }
+
+    // ─── Grafo Hospitalar ─────────────────────────────────────────────
+    static class GrafoHospitalar {
+        final Map<String, Setor> setores = new LinkedHashMap<>();
+        final Map<String, List<Aresta>> adjacencias = new HashMap<>();
+
+        void adicionarSetor(Setor s) {
+            setores.put(s.id, s);
+            adjacencias.putIfAbsent(s.id, new ArrayList<>());
+        }
+
+        void adicionarAresta(String origem, String destino, double pesoBase) {
+            adjacencias.get(origem).add(new Aresta(destino, pesoBase));
+        }
+
+        /**
+         * Custo dinâmico de uma aresta leva em conta:
+         *  - Peso base da aresta
+         *  - Tempo médio de atendimento do setor destino
+         *  - Fator de lotação: quanto mais cheio, maior o custo
+         *  - Fator de urgência: pacientes mais críticos têm custo reduzido
+         */
+        double calcularCusto(Aresta aresta, Prioridade prioridade) {
+            Setor destino = setores.get(aresta.destino);
+            if (destino == null) return Double.MAX_VALUE;
+
+            double fatorLotacao = 1.0 + (1.0 - destino.disponibilidade()) * 2.0;
+            double fatorUrgencia = 1.0 / (6.0 - prioridade.nivel); // mais urgente = menor custo
+            double tempoEspera = destino.tempoMedioAtendimento * fatorLotacao;
+
+            return (aresta.pesoBase + tempoEspera) * fatorUrgencia;
+        }
+
+        /**
+         * Dijkstra — caminho de menor custo de 'origem' até 'destino'
+         */
+        ResultadoDijkstra dijkstra(String origem, String destino, Prioridade prioridade) {
+            Map<String, Double> distancias = new HashMap<>();
+            Map<String, Integer> iteracoes = new HashMap<>();
+            setores.keySet().forEach(id -> distancias.put(id, Double.MAX_VALUE));
+            distancias.put(origem, 0.0);
+
+            PriorityQueue<No> fila = new PriorityQueue<>();
+            fila.add(new No(origem, 0.0, List.of(origem)));
+
+            int totalIteracoes = 0;
+
+            while (!fila.isEmpty()) {
+                No atual = fila.poll();
+                totalIteracoes++;
+                iteracoes.put(atual.setorId, iteracoes.getOrDefault(atual.setorId, 0) + 1);
+
+                if (atual.setorId.equals(destino)) {
+                    return new ResultadoDijkstra(atual.caminho, atual.custo, totalIteracoes, distancias);
+                }
+
+                if (atual.custo > distancias.get(atual.setorId)) continue;
+
+                for (Aresta aresta : adjacencias.getOrDefault(atual.setorId, List.of())) {
+                    double novoCusto = atual.custo + calcularCusto(aresta, prioridade);
+                    if (novoCusto < distancias.getOrDefault(aresta.destino, Double.MAX_VALUE)) {
+                        distancias.put(aresta.destino, novoCusto);
+                        List<String> novoCaminho = new ArrayList<>(atual.caminho);
+                        novoCaminho.add(aresta.destino);
+                        fila.add(new No(aresta.destino, novoCusto, novoCaminho));
+                    }
+                }
+            }
+
+            return new ResultadoDijkstra(List.of(), Double.MAX_VALUE, totalIteracoes, distancias);
+        }
+    }
+
+    record ResultadoDijkstra(List<String> caminho, double custoTotal,
+                              int iteracoes, Map<String, Double> todasDistancias) {}
+
+    // ─── Builder do Hospital Unimed ───────────────────────────────────
+    static GrafoHospitalar construirHospitalUnimed() {
+        GrafoHospitalar g = new GrafoHospitalar();
+
+        // Setores (id, nome, capacidade, ocupação atual, tempo médio atendimento em min)
+        g.adicionarSetor(new Setor("RECEPCAO",    "Recepção & Cadastro",       10,  7, 10));
+        g.adicionarSetor(new Setor("TRIAGEM",     "Triagem Manchester",          5,  4, 15));
+        g.adicionarSetor(new Setor("EMG",         "Emergência / Reanimação",     3,  2,  5));
+        g.adicionarSetor(new Setor("SALA_VERMELHA","Sala Vermelha",              2,  1, 30));
+        g.adicionarSetor(new Setor("CLINICA",     "Clínica Médica",             12,  9, 40));
+        g.adicionarSetor(new Setor("ORTOPEDIA",   "Ortopedia & Trauma",          6,  3, 45));
+        g.adicionarSetor(new Setor("EXAMES_LAB",  "Exames Laboratoriais",        8,  6, 25));
+        g.adicionarSetor(new Setor("EXAMES_IMG",  "Imagem (RX/TC/USG)",          4,  3, 35));
+        g.adicionarSetor(new Setor("OBSERVACAO",  "Observação / Maca",          15, 11, 60));
+        g.adicionarSetor(new Setor("INTERNACAO",  "Internação",                 20, 14, 480));
+        g.adicionarSetor(new Setor("ALTA",        "Alta / Liberação",           99,  0,  5));
+
+        // Arestas (origem → destino, tempo base de transição em minutos)
+        g.adicionarAresta("RECEPCAO",    "TRIAGEM",       2);
+        g.adicionarAresta("TRIAGEM",     "EMG",           1);  // urgência máxima
+        g.adicionarAresta("TRIAGEM",     "CLINICA",       3);
+        g.adicionarAresta("TRIAGEM",     "ORTOPEDIA",     3);
+        g.adicionarAresta("EMG",         "SALA_VERMELHA", 1);
+        g.adicionarAresta("EMG",         "EXAMES_LAB",    5);
+        g.adicionarAresta("EMG",         "EXAMES_IMG",    5);
+        g.adicionarAresta("SALA_VERMELHA","OBSERVACAO",   5);
+        g.adicionarAresta("SALA_VERMELHA","INTERNACAO",  10);
+        g.adicionarAresta("CLINICA",     "EXAMES_LAB",    5);
+        g.adicionarAresta("CLINICA",     "EXAMES_IMG",    5);
+        g.adicionarAresta("CLINICA",     "OBSERVACAO",   10);
+        g.adicionarAresta("CLINICA",     "ALTA",         15);
+        g.adicionarAresta("ORTOPEDIA",   "EXAMES_IMG",    5);
+        g.adicionarAresta("ORTOPEDIA",   "OBSERVACAO",   10);
+        g.adicionarAresta("ORTOPEDIA",   "INTERNACAO",   20);
+        g.adicionarAresta("ORTOPEDIA",   "ALTA",         20);
+        g.adicionarAresta("EXAMES_LAB",  "CLINICA",       5);
+        g.adicionarAresta("EXAMES_LAB",  "OBSERVACAO",   10);
+        g.adicionarAresta("EXAMES_IMG",  "CLINICA",       5);
+        g.adicionarAresta("EXAMES_IMG",  "ORTOPEDIA",     5);
+        g.adicionarAresta("EXAMES_IMG",  "OBSERVACAO",   10);
+        g.adicionarAresta("OBSERVACAO",  "INTERNACAO",   30);
+        g.adicionarAresta("OBSERVACAO",  "ALTA",         30);
+        g.adicionarAresta("INTERNACAO",  "ALTA",        480);
+
+        return g;
+    }
+
+    // ─── Utilitários de impressão ─────────────────────────────────────
+    static void printLinha() {
+        System.out.println(BLUE + "═".repeat(62) + RESET);
+    }
+
+    static void printSubLinha() {
+        System.out.println(CYAN + "─".repeat(62) + RESET);
+    }
+
+    static void printCabecalho() {
+        printLinha();
+        System.out.println(BOLD + BLUE +
+            "  🏥  UNIMED SmartQueue — Roteamento por Dijkstra" + RESET);
+        System.out.println(CYAN + "       Sistema Inteligente de Triagem Hospitalar" + RESET);
+        printLinha();
+    }
+
+    static void printStatusHospital(GrafoHospitalar g) {
+        System.out.println(BOLD + "\n📊 STATUS ATUAL DOS SETORES\n" + RESET);
+        System.out.printf("  %-24s %-28s %s%n", "Setor", "Ocupação", "Tempo Médio");
+        printSubLinha();
+        for (Setor s : g.setores.values()) {
+            if (s.id.equals("ALTA")) continue;
+            System.out.printf("  %-24s %s  %s%d min%s%n",
+                s.nome,
+                s.statusBar(),
+                YELLOW, s.tempoMedioAtendimento, RESET
+            );
+        }
+        System.out.println();
+    }
+
+    static void printResultado(GrafoHospitalar g, ResultadoDijkstra res,
+                                String paciente, Prioridade prioridade) {
+        printLinha();
+        System.out.printf("%n%s👤 PACIENTE:%s %s%n", BOLD, RESET, paciente);
+        System.out.printf("%s🎯 PRIORIDADE:%s %s — %s%n%n",
+            BOLD, RESET, prioridade.label, prioridade.descricao);
+
+        if (res.caminho().isEmpty()) {
+            System.out.println(RED + "  ❌ Nenhum caminho encontrado!" + RESET);
+            return;
+        }
+
+        System.out.println(BOLD + "🗺️  CAMINHO ÓTIMO CALCULADO:" + RESET);
+        System.out.println();
+
+        for (int i = 0; i < res.caminho().size(); i++) {
+            String id = res.caminho().get(i);
+            Setor s = g.setores.get(id);
+            String seta = (i < res.caminho().size() - 1) ? " →" : "";
+            String cor = id.equals("ALTA") ? GREEN :
+                         id.equals("EMG") || id.equals("SALA_VERMELHA") ? RED : CYAN;
+            System.out.printf("  %s[%d] %-22s%s%s%n",
+                cor + BOLD, i + 1, s.nome, RESET, seta);
+        }
+
+        System.out.printf("%n%s⏱️  Custo total estimado:%s %.1f unidades%n",
+            BOLD, RESET, res.custoTotal());
+        System.out.printf("%s🔄  Iterações do Dijkstra:%s %d nós processados%n",
+            BOLD, RESET, res.iteracoes());
+        System.out.println();
+    }
+
+    // ─── Main ─────────────────────────────────────────────────────────
+    public static void main(String[] args) {
+        printCabecalho();
+
+        GrafoHospitalar hospital = construirHospitalUnimed();
+        printStatusHospital(hospital);
+
+        // ── Cenário 1: Emergência cardíaca ───────────────────────────
+        printResultado(hospital,
+            hospital.dijkstra("RECEPCAO", "ALTA", Prioridade.VERMELHO),
+            "João Silva, 58 anos — Dor torácica intensa",
+            Prioridade.VERMELHO
+        );
+
+        // ── Cenário 2: Fratura com dor moderada ─────────────────────
+        printResultado(hospital,
+            hospital.dijkstra("RECEPCAO", "ALTA", Prioridade.AMARELO),
+            "Maria Souza, 34 anos — Suspeita de fratura no pulso",
+            Prioridade.AMARELO
+        );
+
+        // ── Cenário 3: Sintoma leve / não urgente ───────────────────
+        printResultado(hospital,
+            hospital.dijkstra("RECEPCAO", "ALTA", Prioridade.VERDE),
+            "Pedro Lima, 22 anos — Dor de garganta há 2 dias",
+            Prioridade.VERDE
+        );
+
+        // ── Comparativo: custo por prioridade ───────────────────────
+        printLinha();
+        System.out.println(BOLD + "\n📈 COMPARATIVO DE CUSTO POR NÍVEL DE URGÊNCIA\n" + RESET);
+        System.out.printf("  %-14s %-14s %s%n", "Prioridade", "Custo Total", "Iterações");
+        printSubLinha();
+        for (Prioridade p : Prioridade.values()) {
+            var r = hospital.dijkstra("RECEPCAO", "ALTA", p);
+            String cor = p == Prioridade.VERMELHO ? RED :
+                         p == Prioridade.LARANJA  ? "\u001B[91m" :
+                         p == Prioridade.AMARELO  ? YELLOW :
+                         p == Prioridade.VERDE    ? GREEN  : BLUE;
+            System.out.printf("  %s%-14s%s %-14.1f %d nós%n",
+                cor, p.label, RESET, r.custoTotal(), r.iteracoes());
+        }
+        printLinha();
+        System.out.printf("%n%s✅ SmartQueue ativo — Todos os pacientes roteados com sucesso!%s%n%n",
+            GREEN + BOLD, RESET);
+    }
+}
