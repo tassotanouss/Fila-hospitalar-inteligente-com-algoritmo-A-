@@ -4,9 +4,19 @@ import java.util.*;
  * =====================================================================
  *  Unimed SmartQueue -- Triagem Inteligente com Algoritmo de Dijkstra
  * =====================================================================
+ *
+ *  Modelagem:
+ *    - Cada setor do hospital e representado como um no do grafo
+ *    - Cada transicao entre setores e uma aresta com peso dinamico
+ *    - O peso combina: tempo de espera, lotacao atual e urgencia do paciente
+ *
+ *  Autores: Matheus Amaral, Tasso Tanouss
+ *  Disciplina: Estrutura de Dados e Algoritmos em Grafos
+ * =====================================================================
  */
 public class HospitalQueue {
 
+    // Codigos de cor ANSI para deixar o terminal mais legivel
     static final String RESET  = "\u001B[0m";
     static final String BOLD   = "\u001B[1m";
     static final String RED    = "\u001B[31m";
@@ -15,6 +25,10 @@ public class HospitalQueue {
     static final String BLUE   = "\u001B[34m";
     static final String CYAN   = "\u001B[36m";
 
+    /**
+     * Niveis de prioridade baseados no Protocolo de Manchester.
+     * Quanto menor o nivel, maior a urgencia do paciente.
+     */
     enum Prioridade {
         VERMELHO("VERMELHO", 1, "Emergencia -- atendimento imediato"),
         LARANJA ("LARANJA",  2, "Muito Urgente -- ate 10 min"),
@@ -33,6 +47,10 @@ public class HospitalQueue {
         }
     }
 
+    /**
+     * Representa um setor do hospital (no do grafo).
+     * Armazena capacidade e ocupacao para calcular disponibilidade em tempo real.
+     */
     static class Setor {
         final String id, nome;
         int capacidadeMax, ocupacaoAtual, tempoMedioAtendimento;
@@ -43,10 +61,12 @@ public class HospitalQueue {
             this.tempoMedioAtendimento = tempo;
         }
 
+        // Retorna um valor entre 0.0 (lotado) e 1.0 (vazio)
         double disponibilidade() {
             return 1.0 - ((double) ocupacaoAtual / capacidadeMax);
         }
 
+        // Barra visual de ocupacao para o terminal
         String statusBar() {
             int pct = (int)((double) ocupacaoAtual / capacidadeMax * 10);
             String cor = pct >= 9 ? RED : pct >= 6 ? YELLOW : GREEN;
@@ -55,14 +75,23 @@ public class HospitalQueue {
         }
     }
 
+    /**
+     * Representa uma aresta do grafo (transicao entre setores).
+     * pesoBase e o tempo minimo de deslocamento entre os setores, em minutos.
+     */
     static class Aresta {
         final String destino;
         final double pesoBase;
+
         Aresta(String destino, double pesoBase) {
             this.destino = destino; this.pesoBase = pesoBase;
         }
     }
 
+    /**
+     * Entrada da fila de prioridade usada pelo Dijkstra (min-heap).
+     * Armazena o custo acumulado e o caminho percorrido ate este no.
+     */
     static class No implements Comparable<No> {
         final String setorId;
         final double custo;
@@ -79,6 +108,10 @@ public class HospitalQueue {
         }
     }
 
+    /**
+     * Grafo que representa a estrutura do hospital.
+     * Contem os setores (nos), as transicoes (arestas) e o algoritmo de Dijkstra.
+     */
     static class GrafoHospitalar {
         final Map<String, Setor> setores = new LinkedHashMap<>();
         final Map<String, List<Aresta>> adjacencias = new HashMap<>();
@@ -93,22 +126,34 @@ public class HospitalQueue {
         }
 
         /**
-         * Custo dinamico: combina tempo de espera, lotacao e urgencia.
+         * Calcula o custo dinamico de uma aresta para um dado paciente.
          *
-         * Regras clinicas por protocolo Manchester:
+         * Formula:
+         *   custo = (pesoBase + tempoMedioDestino * fatorLotacao) * fatorUrgencia
          *
-         * VERMELHO/LARANJA (nivel 1-2): risco de vida
-         *   - Obrigatorio: Emergencia e Sala Vermelha
-         *   - Bloqueado: Ortopedia, Clinica
+         *   fatorLotacao  = 1 + (1 - disponibilidade) * 2
+         *     -> setor lotado aumenta o custo em ate 3x
          *
-         * AMARELO (nivel 3): urgente, trauma/fratura
-         *   - Rota: Triagem -> Ortopedia -> Imagem -> Observacao -> Alta
-         *   - Bloqueado: Emergencia, Sala Vermelha, Clinica
-         *   - Alta so permitida apos Imagem
+         *   fatorUrgencia = 1 / (6 - nivel)
+         *     -> pacientes mais urgentes tem custo menor, priorizando-os na fila
          *
-         * VERDE/AZUL (nivel 4-5): nao urgente, sintomas leves
-         *   - Rota: Triagem -> Clinica -> (Exames) -> Alta
-         *   - Bloqueado: Emergencia, Sala Vermelha, Ortopedia, Internacao
+         * Alem da formula, aplica regras clinicas do Protocolo de Manchester
+         * bloqueando arestas inadequadas para cada nivel de prioridade.
+         *
+         * Regras clinicas:
+         *
+         *   VERMELHO/LARANJA (nivel 1-2): risco de vida
+         *     - Obrigatorio: Emergencia e Sala Vermelha
+         *     - Bloqueado: Ortopedia, Clinica
+         *
+         *   AMARELO (nivel 3): urgente, trauma/fratura
+         *     - Rota: Triagem -> Ortopedia -> Imagem -> Observacao -> Alta
+         *     - Bloqueado: Emergencia, Sala Vermelha, Clinica
+         *     - Alta so permitida apos passar por Imagem
+         *
+         *   VERDE/AZUL (nivel 4-5): nao urgente, sintomas leves
+         *     - Rota: Triagem -> Clinica -> (Exames) -> Alta
+         *     - Bloqueado: Emergencia, Sala Vermelha, Ortopedia, Internacao
          */
         double calcularCusto(Aresta aresta, Prioridade prioridade) {
             Setor destino = setores.get(aresta.destino);
@@ -142,6 +187,7 @@ public class HospitalQueue {
                 if (aresta.destino.equals("INTERNACAO"))    return Double.MAX_VALUE;
             }
 
+            // Calculo do custo real da aresta
             double fatorLotacao  = 1.0 + (1.0 - destino.disponibilidade()) * 2.0;
             double fatorUrgencia = 1.0 / (6.0 - prioridade.nivel);
             double tempoEspera   = destino.tempoMedioAtendimento * fatorLotacao;
@@ -150,28 +196,40 @@ public class HospitalQueue {
         }
 
         /**
-         * Dijkstra -- caminho de menor custo de 'origem' ate 'destino'
+         * Algoritmo de Dijkstra com min-heap (PriorityQueue).
+         *
+         * Encontra o caminho de menor custo entre 'origem' e 'destino',
+         * respeitando as regras clinicas definidas em calcularCusto().
+         *
+         * Complexidade: O(E log V)
+         *   E = numero de arestas (transicoes entre setores)
+         *   V = numero de vertices (setores)
          */
         ResultadoDijkstra dijkstra(String origem, String destino, Prioridade prioridade) {
+            // Inicializa todas as distancias como infinito
             Map<String, Double> distancias = new HashMap<>();
             setores.keySet().forEach(id -> distancias.put(id, Double.MAX_VALUE));
             distancias.put(origem, 0.0);
 
+            // Fila de prioridade ordenada pelo menor custo (min-heap)
             PriorityQueue<No> fila = new PriorityQueue<>();
             fila.add(new No(origem, 0.0, List.of(origem)));
 
             int totalIteracoes = 0;
 
             while (!fila.isEmpty()) {
-                No atual = fila.poll();
+                No atual = fila.poll(); // extrai o no de menor custo
                 totalIteracoes++;
 
+                // Chegou ao destino: retorna o caminho encontrado
                 if (atual.setorId.equals(destino)) {
                     return new ResultadoDijkstra(atual.caminho, atual.custo, totalIteracoes);
                 }
 
+                // Ignora nos ja processados com custo menor (entrada desatualizada na fila)
                 if (atual.custo > distancias.get(atual.setorId)) continue;
 
+                // Relaxamento das arestas vizinhas
                 for (Aresta aresta : adjacencias.getOrDefault(atual.setorId, List.of())) {
                     double novoCusto = atual.custo + calcularCusto(aresta, prioridade);
                     if (novoCusto < distancias.getOrDefault(aresta.destino, Double.MAX_VALUE)) {
@@ -183,15 +241,22 @@ public class HospitalQueue {
                 }
             }
 
+            // Nenhum caminho valido encontrado
             return new ResultadoDijkstra(List.of(), Double.MAX_VALUE, totalIteracoes);
         }
     }
 
+    // Record imutavel para encapsular o resultado do Dijkstra
     record ResultadoDijkstra(List<String> caminho, double custoTotal, int iteracoes) {}
 
+    /**
+     * Constroi o grafo com os setores e arestas da UPA Unimed.
+     * Os valores de ocupacao simulam um cenario de alta demanda real.
+     */
     static GrafoHospitalar construirHospitalUnimed() {
         GrafoHospitalar g = new GrafoHospitalar();
 
+        // Setores: (id, nome, capacidadeMax, ocupacaoAtual, tempoMedioAtendimento em min)
         g.adicionarSetor(new Setor("RECEPCAO",     "Recepcao & Cadastro",      10,  7, 10));
         g.adicionarSetor(new Setor("TRIAGEM",      "Triagem Manchester",         5,  4, 15));
         g.adicionarSetor(new Setor("EMG",          "Emergencia / Reanimacao",    3,  2,  5));
@@ -204,6 +269,7 @@ public class HospitalQueue {
         g.adicionarSetor(new Setor("INTERNACAO",   "Internacao",                20, 14, 480));
         g.adicionarSetor(new Setor("ALTA",         "Alta / Liberacao",          99,  0,  5));
 
+        // Arestas: (origem, destino, tempoBase em minutos)
         g.adicionarAresta("RECEPCAO",     "TRIAGEM",        2);
         g.adicionarAresta("TRIAGEM",      "EMG",            1);
         g.adicionarAresta("TRIAGEM",      "CLINICA",        3);
@@ -232,6 +298,8 @@ public class HospitalQueue {
 
         return g;
     }
+
+    // ─── Utilitarios de impressao ─────────────────────────────────────
 
     static void printLinha() {
         System.out.println(BLUE + "=".repeat(62) + RESET);
@@ -294,27 +362,33 @@ public class HospitalQueue {
         System.out.println();
     }
 
+    // ─── Ponto de entrada ─────────────────────────────────────────────
+
     public static void main(String[] args) {
         printCabecalho();
 
         GrafoHospitalar hospital = construirHospitalUnimed();
         printStatusHospital(hospital);
 
+        // Cenario 1: emergencia cardiaca (prioridade maxima)
         printResultado(hospital,
             hospital.dijkstra("RECEPCAO", "ALTA", Prioridade.VERMELHO),
             "Joao Silva, 58 anos - Dor toracica intensa",
             Prioridade.VERMELHO);
 
+        // Cenario 2: trauma ortopedico (urgente)
         printResultado(hospital,
             hospital.dijkstra("RECEPCAO", "ALTA", Prioridade.AMARELO),
             "Maria Souza, 34 anos - Suspeita de fratura no pulso",
             Prioridade.AMARELO);
 
+        // Cenario 3: sintoma leve (pouco urgente)
         printResultado(hospital,
             hospital.dijkstra("RECEPCAO", "ALTA", Prioridade.VERDE),
             "Pedro Lima, 22 anos - Dor de garganta ha 2 dias",
             Prioridade.VERDE);
 
+        // Comparativo completo entre todos os niveis de urgencia
         printLinha();
         System.out.println(BOLD + "\n[COMPARATIVO] CUSTO POR NIVEL DE URGENCIA\n" + RESET);
         System.out.printf("  %-12s %-14s %s%n", "Prioridade", "Custo Total", "Iteracoes");
